@@ -9,10 +9,10 @@ import ServiceManagement
 
 // MARK: - Constants
 
-let FATHOM_VERSION = "v0.2.26-Beta"
+let FATHOM_VERSION = "v0.2.31-Beta"
 let FATHOM_CHANNEL = "beta"
-/// Menubar panel width (must match MainRoot + NSPopover contentSize).
-let kPopoverWidth: CGFloat = 340
+/// Menubar panel width — BatFi/NSMenu-like (~300).
+let kPopoverWidth: CGFloat = 300
 /// How often the open popover refreshes live numbers (seconds).
 let kMenuPanelTick: TimeInterval = 0.45
 /// Menu chrome: original (default) or newer (compact dense layout).
@@ -57,7 +57,7 @@ let kPowerPollACIdle: TimeInterval = 10.0   // full + on AC
 let kProcPollIdle: TimeInterval = 20.0      // process scan when UI closed
 let kProcPollUI: TimeInterval = 5.0
 /// How often to re-run expensive shell battery cross-checks (pmset/ioreg).
-let kBatteryShellCrossCheck: TimeInterval = 120.0
+let kBatteryShellCrossCheck: TimeInterval = 90.0
 /// Dashboard layout prefs (JSON blob key prefix handled by DashboardPrefs).
 let kDashboardPrefs = "fathom.dashboard.prefs.v1"
 /// First-run tip sheet dismissed.
@@ -203,21 +203,25 @@ enum MenuBarDisplayMode: String {
     }
 }
 
-/// Popover chrome layout. “Original” is Fathom’s default; “Newer” is a denser compact layout.
+/// Popover chrome. Default is **Newer** (BatFi-faithful). Original keeps Fathom’s earlier layout.
 enum MenuChromeStyle: String, CaseIterable {
-    case original
-    case newer
+    case newer      // BatFi-exact (default)
+    case original   // previous Fathom balanced layout
 
     var title: String {
         switch self {
-        case .original: return "Original"
         case .newer: return "Newer"
+        case .original: return "Original"
         }
     }
 
     static var current: MenuChromeStyle {
-        let raw = UserDefaults.standard.string(forKey: kMenuChromeStyle) ?? "original"
-        return MenuChromeStyle(rawValue: raw) ?? .original
+        // Default Newer (BatFi) unless user explicitly chose original
+        if UserDefaults.standard.object(forKey: kMenuChromeStyle) == nil {
+            return .newer
+        }
+        let raw = UserDefaults.standard.string(forKey: kMenuChromeStyle) ?? "newer"
+        return MenuChromeStyle(rawValue: raw) ?? .newer
     }
 
     static func set(_ style: MenuChromeStyle) {
@@ -226,9 +230,95 @@ enum MenuChromeStyle: String, CaseIterable {
     }
 
     var isNewer: Bool { self == .newer }
-    var padH: CGFloat { isNewer ? FathomSpace.padHTight : FathomSpace.padH }
-    var heroPct: CGFloat { isNewer ? 34 : FathomType.hero }
-    var heroIcon: CGFloat { isNewer ? 48 : 40 }
+    var padH: CGFloat { isNewer ? 16 : FathomSpace.padH }
+    var heroPct: CGFloat { isNewer ? 36 : FathomType.hero }
+    var heroIcon: CGFloat { isNewer ? 52 : 40 }
+}
+
+// MARK: - BatFi-exact menu chrome (mirrors rurza/BatFi BatteryInfoView + MenuContent)
+
+/// Primary row: "Battery" | "72%" (bold value)
+private struct BatFiMainRow: View {
+    let label: String
+    let value: String
+    var emphasizeValue: Bool = true
+    var body: some View {
+        HStack {
+            Text(label)
+                .font(.body)
+                .foregroundColor(.primary)
+            Spacer(minLength: 20)
+            Text(value)
+                .font(.body)
+                .fontWeight(emphasizeValue ? .semibold : .regular)
+                .foregroundStyle(emphasizeValue ? Color.primary : Color.secondary)
+                .multilineTextAlignment(.trailing)
+                .lineLimit(2)
+                .monospacedDigit()
+        }
+    }
+}
+
+/// Secondary callout row (Power Source, cycles, apps…)
+private struct BatFiDetailRow: View {
+    let label: String
+    let value: String
+    var body: some View {
+        HStack(alignment: .top) {
+            Text(label)
+            Spacer(minLength: 20)
+            Text(value)
+                .multilineTextAlignment(.trailing)
+                .lineLimit(2)
+                .monospacedDigit()
+        }
+        .font(.callout)
+        .foregroundColor(.secondary)
+    }
+}
+
+/// BatFi double-hairline separator
+private struct BatFiSeparator: View {
+    var body: some View {
+        VStack(spacing: 0) {
+            Rectangle().frame(height: 1)
+                .foregroundColor(Color.black.opacity(0.17))
+            Rectangle().frame(height: 1)
+                .foregroundColor(Color.white.opacity(0.1))
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+/// NSMenu-style action row
+private struct BatFiMenuAction: View {
+    let title: String
+    var trailing: String? = nil
+    var showChevron: Bool = false
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            HStack {
+                Text(title)
+                    .font(.body)
+                    .foregroundColor(.primary)
+                Spacer(minLength: 12)
+                if let trailing {
+                    Text(trailing)
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                }
+                if showChevron {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(Color.secondary.opacity(0.55))
+                }
+            }
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
 }
 let UPDATE_CHECK_URL = URL(string: "https://chopstickshq.com/fathom/version.json")!
 let UPDATE_PAGE_URL = URL(string: "https://chopstickshq.com/fathom/")!
@@ -680,6 +770,52 @@ final class PowerStore: ObservableObject {
     /// Serial work queue so polls never pile up.
     private let workQ = DispatchQueue(label: "fathom.power", qos: .utility)
     private var pollInFlight = false
+    /// After sleep/wake, SMC InstantAmperage is often near-zero → absurd “hours left”. Hold estimates.
+    private var minutesHoldUntil: CFAbsoluteTime = 0
+    private var minutesEma: Double = 0
+    private var hasMinutesEma = false
+    /// EMA on pack draw (mA) for stable live time-to-empty / full.
+    private var ampEmaMA: Double = 0
+    private var hasAmpEma = false
+    /// EMA on SOC so % doesn't flicker between IOPS (menu) and raw (accurate).
+    private var levelEma: Double = 0
+    private var hasLevelEma = false
+    /// Plausible MacBook ranges (system still returns values under 65535 that are garbage).
+    private static let maxDischargeMinutes = 24 * 60   // 24h hard ceiling (was 36; multi-day = bad amp)
+    private static let maxChargeMinutes = 10 * 60      // 10h to full
+    private static let minLiveAmpMA = 80.0             // ignore micro-draw after lid open
+    private static let minLiveChargeW = 0.45
+
+    /// Call on system/display wake so we don't show 500h “left” from tiny residual amps.
+    func notePowerTransition(wake: Bool) {
+        if wake {
+            minutesHoldUntil = CFAbsoluteTimeGetCurrent() + 20
+            hasMinutesEma = false
+            minutesEma = 0
+            hasAmpEma = false
+            ampEmaMA = 0
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.remainingMinutes = nil
+                self.minutesIsLiveEstimate = false
+                self.timeEstimateSource = "—"
+                if self.batteryPresent && !self.isOnAC && !self.isCharging {
+                    self.timeText = "Calculating…"
+                }
+            }
+            // Force a fresh battery read soon after sensors settle
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                self?.poll()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+                self?.poll()
+            }
+        } else {
+            // Sleeping: clear so we never surface a stale multi-day estimate on resume
+            minutesHoldUntil = CFAbsoluteTimeGetCurrent() + 1
+            hasMinutesEma = false
+        }
+    }
 
     func start() {
         restartTimer(interval: currentInterval())
@@ -823,20 +959,58 @@ final class PowerStore: ObservableObject {
     private func applyBattery(_ s: BatSnap) {
         // Only publish when values change — cuts SwiftUI re-renders dramatically
         if batteryPresent != s.present { batteryPresent = s.present }
-        if levelPercent != s.level { levelPercent = s.level }
+
+        // Smooth SOC: prefer accurate raw level without 1% flicker
+        let targetLevel = Double(min(100, max(0, s.level)))
+        if hasLevelEma {
+            // Jump immediately on large real changes (unplug, charge jump); else EMA
+            if abs(targetLevel - levelEma) >= 2.0 {
+                levelEma = targetLevel
+            } else {
+                levelEma = levelEma * 0.55 + targetLevel * 0.45
+            }
+        } else {
+            levelEma = targetLevel
+            hasLevelEma = true
+        }
+        let smoothLevel = min(100, max(0, Int(levelEma.rounded())))
+        if levelPercent != smoothLevel { levelPercent = smoothLevel }
+
         if isCharging != s.charging { isCharging = s.charging }
         if isOnAC != s.onAC { isOnAC = s.onAC }
         let srcLabel = s.sourcesLabel.isEmpty ? "—" : s.sourcesLabel
         if batterySourcesUsed != srcLabel { batterySourcesUsed = srcLabel }
-        if minutesIsLiveEstimate != s.minutesIsLiveEstimate { minutesIsLiveEstimate = s.minutesIsLiveEstimate }
-        let tes = s.minutesIsLiveEstimate ? "From current draw" : (s.minutes != nil ? "System" : "—")
-        if timeEstimateSource != tes { timeEstimateSource = tes }
+
+        // Smooth pack amperage → stable watts + time
+        if let amp = s.amperageMA, abs(amp) >= 20 {
+            let a = Double(amp)
+            if hasAmpEma {
+                let alpha = abs(a - ampEmaMA) > 400 ? 0.55 : 0.28
+                ampEmaMA = ampEmaMA * (1 - alpha) + a * alpha
+            } else {
+                ampEmaMA = a
+                hasAmpEma = true
+            }
+        } else if !s.charging && s.onAC {
+            hasAmpEma = false
+            ampEmaMA = 0
+        }
+
+        // Rebuild charge watts from smoothed amp when possible (more accurate than Instant spikes)
+        var chargeW = s.chargeW
+        if hasAmpEma, let v = s.voltageMV, v > 0 {
+            let wFromAmp = abs(ampEmaMA) / 1000.0 * Double(v) / 1000.0
+            if wFromAmp > 0.08 {
+                chargeW = wFromAmp
+            }
+        }
+
         // Smooth charge/discharge watts
-        if s.chargeW > 0.05 {
-            let alpha: Double = hasChargeEma ? 0.35 : 1.0
-            chargeEma = hasChargeEma ? chargeEma * (1 - alpha) + s.chargeW * alpha : s.chargeW
+        if chargeW > 0.05 {
+            let alpha: Double = hasChargeEma ? 0.32 : 1.0
+            chargeEma = hasChargeEma ? chargeEma * (1 - alpha) + chargeW * alpha : chargeW
             hasChargeEma = true
-            if abs(chargeWatts - chargeEma) >= 0.08 { chargeWatts = chargeEma }
+            if abs(chargeWatts - chargeEma) >= 0.05 { chargeWatts = chargeEma }
         } else if chargeWatts != 0 {
             chargeWatts = 0
             hasChargeEma = false
@@ -846,49 +1020,142 @@ final class PowerStore: ObservableObject {
         if healthPercent != s.health { healthPercent = s.health }
         if capacityRaw != s.rawMax { capacityRaw = s.rawMax }
         if designCapacity != s.design { designCapacity = s.design }
+
+        // After lid close/open, hold estimates until amperage is trustworthy
+        let holding = CFAbsoluteTimeGetCurrent() < minutesHoldUntil
+
+        // Prefer live estimate from smoothed amp (system times often wrong after sleep / idle)
+        var liveMins: Int? = nil
+        if !holding, hasAmpEma {
+            var liveSnap = s
+            liveSnap.amperageMA = Int(ampEmaMA.rounded())
+            liveSnap.chargeW = chargeWatts > 0.05 ? chargeWatts : chargeW
+            liveMins = Self.computeLiveRemainingMinutes(liveSnap)
+        }
+        let systemMins = holding ? nil : Self.sanitizeMinutes(s.minutes, charging: s.charging, onAC: s.onAC)
+
+        // Choose best minutes: live when solid; blend when both exist and close; reject wild system
+        var chosen: Int? = nil
+        var liveEst = false
+        if let live = liveMins, let sys = systemMins {
+            let ratio = Double(sys) / Double(max(1, live))
+            if ratio > 0.65 && ratio < 1.55 {
+                // Agree — blend (slightly prefer live pack draw)
+                chosen = Int((Double(live) * 0.6 + Double(sys) * 0.4).rounded())
+                liveEst = true
+            } else {
+                // Disagree — trust live amperage math (pmset often shows multi-hour garbage)
+                chosen = live
+                liveEst = true
+            }
+        } else if let live = liveMins {
+            chosen = live
+            liveEst = true
+        } else if let sys = systemMins {
+            chosen = sys
+            liveEst = false
+        }
+
         let newMins: Int? = {
-            if let m = s.minutes, m > 0, m < 65535 { return m }
-            return nil
+            guard let m = chosen.flatMap({ Self.sanitizeMinutes($0, charging: s.charging, onAC: s.onAC) }) else {
+                return holding ? nil : nil
+            }
+            if hasMinutesEma {
+                let prev = minutesEma
+                if Double(m) > prev * 2.0 && Double(m) > 4 * 60 && prev > 15 {
+                    return max(1, Int(prev.rounded()))
+                }
+                if Double(m) < prev * 0.45 && prev > 30 && Double(m) < 90 {
+                    // abrupt collapse: trust new live more
+                    minutesEma = prev * 0.35 + Double(m) * 0.65
+                } else {
+                    minutesEma = prev * 0.62 + Double(m) * 0.38
+                }
+            } else {
+                minutesEma = Double(m)
+                hasMinutesEma = true
+            }
+            return max(1, Int(minutesEma.rounded()))
         }()
+
+        if newMins == nil && !holding && !s.charging && !s.onAC {
+            if let cur = remainingMinutes, cur > Self.maxDischargeMinutes / 2 {
+                hasMinutesEma = false
+            }
+        }
         if remainingMinutes != newMins { remainingMinutes = newMins }
+
+        let tes: String
+        if holding {
+            liveEst = false
+            tes = "—"
+        } else if liveEst {
+            tes = "From pack draw"
+        } else if newMins != nil {
+            tes = "System"
+        } else {
+            tes = "—"
+        }
+        if minutesIsLiveEstimate != liveEst { minutesIsLiveEstimate = liveEst }
+        if timeEstimateSource != tes { timeEstimateSource = tes }
+
         if !s.present {
             if statusText != "No battery" { statusText = "No battery" }
             if timeText != "Desktop / AC" { timeText = "Desktop / AC" }
             if remainingMinutes != nil { remainingMinutes = nil }
             if minutesIsLiveEstimate { minutesIsLiveEstimate = false }
+            hasMinutesEma = false
+            hasLevelEma = false
+            hasAmpEma = false
             return
         }
-        let showW = chargeWatts > 0.05 ? chargeWatts : s.chargeW
+        let showW = chargeWatts > 0.05 ? chargeWatts : chargeW
         let newStatus: String
         let newTime: String
         if s.charging {
             newStatus = showW > 0.05
                 ? String(format: "Charging · %.1f W", showW)
                 : "Charging"
-            if let m = remainingMinutes {
-                let base = m >= 60 ? String(format: "%dh %dm to full", m / 60, m % 60) : "\(m) min to full"
-                newTime = s.minutesIsLiveEstimate ? "\(base) · draw est." : base
+            if let m = remainingMinutes, !holding {
+                newTime = m >= 60
+                    ? String(format: "%dh %dm to full", m / 60, m % 60)
+                    : "\(m) min to full"
             } else {
                 newTime = "Calculating…"
             }
         } else if s.onAC {
-            newStatus = s.level >= 100 ? "Full · on AC" : "Plugged in"
+            newStatus = smoothLevel >= 100 ? "Full · on AC" : "Plugged in"
             newTime = "On AC power"
             if remainingMinutes != nil { remainingMinutes = nil }
             if minutesIsLiveEstimate { minutesIsLiveEstimate = false }
+            hasMinutesEma = false
+            hasAmpEma = false
         } else {
             newStatus = showW > 0.05
                 ? String(format: "On battery · %.1f W", showW)
                 : "On battery"
-            if let m = remainingMinutes {
-                let base = m >= 60 ? String(format: "%dh %dm left", m / 60, m % 60) : "\(m) min left"
-                newTime = s.minutesIsLiveEstimate ? "\(base) · draw est." : base
+            if let m = remainingMinutes, !holding {
+                newTime = m >= 60
+                    ? String(format: "%dh %dm left", m / 60, m % 60)
+                    : "\(m) min left"
             } else {
                 newTime = "Calculating…"
             }
         }
         if statusText != newStatus { statusText = newStatus }
         if timeText != newTime { timeText = newTime }
+    }
+
+    /// Reject SMC/system garbage (e.g. 500+ hours after lid open).
+    private static func sanitizeMinutes(_ minutes: Int?, charging: Bool, onAC: Bool) -> Int? {
+        guard let m = minutes, m > 0, m < 65535 else { return nil }
+        if onAC && !charging { return nil }
+        if charging {
+            guard m <= maxChargeMinutes else { return nil }
+        } else {
+            guard m <= maxDischargeMinutes else { return nil }
+        }
+        return m
     }
 
     struct BatSnap {
@@ -956,16 +1223,88 @@ final class PowerStore: ObservableObject {
     private static func propInt(_ s: io_service_t, _ k: String) -> Int? { cfInt(prop(s, k)) }
     private static func propBool(_ s: io_service_t, _ k: String) -> Bool? { cfBool(prop(s, k)) }
 
-    private static func signedMA(_ raw: Int) -> Int {
-        Int(Int32(bitPattern: UInt32(truncatingIfNeeded: UInt64(bitPattern: Int64(raw)))))
+    /// Nested IORegistry dictionaries (BatteryData, PowerTelemetryData) need a real bridge.
+    private static func propDict(_ s: io_service_t, _ k: String) -> [String: Any]? {
+        guard let v = prop(s, k) else { return nil }
+        if let d = v as? [String: Any] { return d }
+        if let nd = v as? NSDictionary {
+            var out: [String: Any] = [:]
+            nd.enumerateKeysAndObjects { key, obj, _ in
+                if let ks = key as? String {
+                    out[ks] = obj
+                } else if let ks = key as? NSString {
+                    out[ks as String] = obj
+                }
+            }
+            return out.isEmpty ? nil : out
+        }
+        return nil
     }
 
-    /// Battery read. Hot path = IOPS + SmartBattery only (IOKit, cheap).
-    /// Shell sources (pmset / ioreg Process) only on rare cross-checks — they dominated CPU.
+    private static func dictInt(_ d: [String: Any], _ k: String) -> Int? {
+        if let n = d[k] as? NSNumber { return n.intValue }
+        if let i = d[k] as? Int { return i }
+        return nil
+    }
+
+    private static func dictSignedMA(_ d: [String: Any], _ k: String) -> Int? {
+        guard let n = d[k] as? NSNumber else {
+            if let i = d[k] as? Int { return signedMA(i) }
+            return nil
+        }
+        let s64 = Int64(bitPattern: n.uint64Value)
+        if abs(s64) <= 50_000 { return Int(s64) }
+        let i64 = n.int64Value
+        if abs(i64) <= 50_000 { return Int(i64) }
+        return Int(Int32(bitPattern: UInt32(truncatingIfNeeded: n.uint64Value)))
+    }
+
+    /// InstantAmperage / Amperage are signed. ioreg often prints them as huge UInt64
+    /// (two's complement), e.g. 18446744073709551267 == -349 mA. Mis-reading as
+    /// unsigned wrecks pack watts and time-to-empty.
+    private static func signedMA(_ raw: Int) -> Int {
+        if abs(raw) <= 30_000 { return raw }
+        // Treat as UInt64 bit pattern → Int64 two's complement
+        let u = UInt64(bitPattern: Int64(raw))
+        let s64 = Int64(bitPattern: u)
+        if abs(s64) <= 30_000 { return Int(s64) }
+        let s32 = Int32(bitPattern: UInt32(truncatingIfNeeded: u))
+        if abs(Int(s32)) <= 30_000 { return Int(s32) }
+        return Int(s64)
+    }
+
+    /// Read InstantAmperage correctly from CFNumber (handles UInt64-as-negative).
+    private static func propSignedAmperage(_ s: io_service_t, _ keys: [String]) -> Int? {
+        for k in keys {
+            guard let v = prop(s, k) else { continue }
+            if let n = v as? NSNumber {
+                // Prefer uint64 bit pattern → signed (Apple InstantAmperage convention)
+                let s64 = Int64(bitPattern: n.uint64Value)
+                if abs(s64) <= 30_000 { return Int(s64) }
+                let i64 = n.int64Value
+                if abs(i64) <= 30_000 { return Int(i64) }
+                let s32 = Int32(bitPattern: UInt32(truncatingIfNeeded: n.uint64Value))
+                if abs(Int(s32)) <= 30_000 { return Int(s32) }
+                continue
+            }
+            if let i = cfInt(v) {
+                let s = signedMA(i)
+                if abs(s) <= 30_000 { return s }
+            }
+        }
+        return nil
+    }
+
+    /// Battery read — **six sources**, hot path is pure IOKit (no shell):
+    /// 1. IOPS (menu bar)  2. SmartBattery raw  3. Gauge (BatteryData SOC)
+    /// 4. Telemetry (SystemLoad / BatteryPower mW)
+    /// Shell (pmset / ioreg text) only on rare cross-checks.
     static func readBattery(includeShellCrossCheck: Bool = false) -> BatSnap {
         var readings: [BatSourceReading] = [
             readBatteryIOPS(),
             readBatterySmartBattery(),
+            readBatteryGauge(),
+            readBatteryTelemetry(),
         ]
         if includeShellCrossCheck {
             readings.append(readBatteryPmset())
@@ -1038,46 +1377,59 @@ final class PowerStore: ObservableObject {
         defer { IOObjectRelease(service) }
         r.present = true
 
+        // Prefer true mAh registers. MaxCapacity is often 100 (percent scale) on AS Macs.
         let rawCur = propInt(service, "AppleRawCurrentCapacity")
         let rawMax = propInt(service, "AppleRawMaxCapacity")
             ?? propInt(service, "NominalChargeCapacity")
-            ?? propInt(service, "MaxCapacity")
+        let nominal = propInt(service, "NominalChargeCapacity")
         r.rawCurrent = rawCur
-        r.rawMax = rawMax
-        if let raw = rawCur, let mx = rawMax, mx > 0 {
-            r.level = min(100, max(0, Int((Double(raw) / Double(mx) * 100).rounded())))
+        r.rawMax = rawMax ?? nominal
+
+        let batData = propDict(service, "BatteryData")
+        // Raw mAh ratio is source-of-truth for SmartBattery reading
+        if let raw = rawCur, let mx = r.rawMax, mx > 50 {
+            r.level = min(100, max(0, Int((Double(raw) / Double(mx) * 100.0).rounded())))
         } else if let cur = propInt(service, "CurrentCapacity"), cur >= 0, cur <= 100 {
             r.level = cur
         }
 
         if let c = propBool(service, "IsCharging") { r.charging = c; if c { r.onAC = true } }
-        if let e = propBool(service, "ExternalConnected") { r.onAC = e || (r.charging == true) }
+        if let e = propBool(service, "ExternalConnected")
+            ?? propBool(service, "AppleRawExternalConnected") {
+            r.onAC = e || (r.charging == true)
+        }
         if let fully = propBool(service, "FullyCharged"), fully {
             r.charging = false
             r.onAC = true
         }
         r.cycles = propInt(service, "CycleCount")
-        let design = propInt(service, "DesignCapacity") ?? 0
+            ?? (batData.flatMap { dictInt($0, "CycleCount") })
+        let design = propInt(service, "DesignCapacity")
+            ?? batData.flatMap { dictInt($0, "DesignCapacity") }
+            ?? 0
         r.design = design > 0 ? design : nil
-        if let rawMax, design > 0 {
-            r.health = min(100, max(0, Int((Double(rawMax) / Double(design) * 100).rounded())))
+        // Health vs design: prefer AppleRawMaxCapacity / DesignCapacity
+        if let mx = r.rawMax ?? nominal, design > 0 {
+            r.health = min(100, max(0, Int((Double(mx) / Double(design) * 100.0).rounded())))
         }
 
         var voltage = propInt(service, "AppleRawBatteryVoltage")
             ?? propInt(service, "Voltage")
             ?? 0
-        if voltage == 0, let batData = prop(service, "BatteryData") as? [String: Any] {
-            if let v = (batData["Voltage"] as? NSNumber)?.intValue { voltage = v }
-            else if let v = (batData["AppleRawBatteryVoltage"] as? NSNumber)?.intValue { voltage = v }
+        if voltage == 0, let batData {
+            voltage = dictInt(batData, "Voltage") ?? dictInt(batData, "AppleRawBatteryVoltage") ?? 0
         }
         r.voltageMV = voltage > 0 ? voltage : nil
 
-        if let amp = propInt(service, "InstantAmperage") ?? propInt(service, "Amperage") {
-            let signed = signedMA(amp)
+        // InstantAmperage first, then Amperage — both need signed decode
+        if let signed = propSignedAmperage(service, ["InstantAmperage", "Amperage"]) {
             r.amperageMA = signed
             if signed != 0, voltage > 0 {
                 let w = abs(Double(signed)) / 1000.0 * Double(voltage) / 1000.0
-                if (r.charging == true && signed > 0) || (r.charging != true && signed < 0) || abs(signed) > 20 {
+                // Discharging → negative amp; charging → positive
+                if (r.charging == true && signed > 0)
+                    || (r.charging != true && signed < 0)
+                    || abs(signed) > 40 {
                     r.chargeW = w
                 }
             }
@@ -1095,19 +1447,100 @@ final class PowerStore: ObservableObject {
            let cc = (charger["ChargingCurrent"] as? NSNumber)?.intValue, cc > 0, voltage > 0 {
             r.chargeW = Double(cc) / 1000.0 * Double(voltage) / 1000.0
         }
+        // System time estimates (often wrong after sleep — used as secondary only)
         if r.charging == true,
-           let t = propInt(service, "AvgTimeToFull") ?? propInt(service, "TimeRemaining"),
+           let t = propInt(service, "AvgTimeToFull"),
            t > 0, t < 65535 {
             r.minutes = t
         } else if r.charging != true,
-                  let t = propInt(service, "AvgTimeToEmpty") ?? propInt(service, "TimeRemaining"),
+                  let t = propInt(service, "AvgTimeToEmpty"),
                   t > 0, t < 65535 {
+            r.minutes = t
+        } else if let t = propInt(service, "TimeRemaining"), t > 0, t < 65535 {
             r.minutes = t
         }
         return r
     }
 
-    // MARK: Source 3 — pmset -g batt
+    // MARK: Source 3 — Fuel gauge SOC (BatteryData.StateOfCharge)
+
+    /// Separate source so merge can weight gauge vs raw mAh vs IOPS.
+    private static func readBatteryGauge() -> BatSourceReading {
+        var r = BatSourceReading(name: "Gauge")
+        let service = IOServiceGetMatchingService(0, IOServiceMatching("AppleSmartBattery"))
+        guard service != 0 else { return r }
+        defer { IOObjectRelease(service) }
+        guard let batData = propDict(service, "BatteryData") else { return r }
+        r.present = true
+        if let soc = dictInt(batData, "StateOfCharge"), soc >= 0, soc <= 100 {
+            r.level = soc
+        }
+        if let cyc = dictInt(batData, "CycleCount") { r.cycles = cyc }
+        if let design = dictInt(batData, "DesignCapacity"), design > 0 {
+            r.design = design
+            if let fcc = dictInt(batData, "FccComp1") ?? dictInt(batData, "FccComp2"), fcc > 0 {
+                r.rawMax = fcc
+                r.health = min(100, max(0, Int((Double(fcc) / Double(design) * 100.0).rounded())))
+            }
+        }
+        if let v = dictInt(batData, "Voltage"), v > 0 { r.voltageMV = v }
+        // Cell voltages average as pack voltage fallback
+        if r.voltageMV == nil, let cells = batData["CellVoltage"] as? [Any] {
+            let vals = cells.compactMap { ($0 as? NSNumber)?.intValue }.filter { $0 > 0 }
+            if !vals.isEmpty {
+                r.voltageMV = vals.reduce(0, +) // series pack sum is pack mV
+            }
+        }
+        return r
+    }
+
+    // MARK: Source 4 — PowerTelemetry (SystemLoad / BatteryPower mW)
+
+    private static func readBatteryTelemetry() -> BatSourceReading {
+        var r = BatSourceReading(name: "Telemetry")
+        let service = IOServiceGetMatchingService(0, IOServiceMatching("AppleSmartBattery"))
+        guard service != 0 else { return r }
+        defer { IOObjectRelease(service) }
+        guard let tel = propDict(service, "PowerTelemetryData") else { return r }
+        r.present = true
+
+        // SystemLoad is mW of system load — excellent proxy for pack draw on battery
+        if let load = (tel["SystemLoad"] as? NSNumber)?.doubleValue, load > 150 {
+            r.chargeW = load / 1000.0
+        }
+        // BatteryPower is signed mW (same UInt64 trick as InstantAmperage)
+        if let bp = dictSignedMA(tel, "BatteryPower") {
+            // BatteryPower is mW, not mA
+            let watts = abs(Double(bp)) / 1000.0
+            if watts > 0.15 && watts < 100 {
+                // Prefer BatteryPower when SystemLoad missing or very different
+                if r.chargeW == nil || abs((r.chargeW ?? 0) - watts) > 1.5 {
+                    r.chargeW = watts
+                } else {
+                    // Blend
+                    r.chargeW = ((r.chargeW ?? watts) + watts) / 2.0
+                }
+            }
+        }
+        // Infer mA if we have voltage
+        if let w = r.chargeW, w > 0.15 {
+            let v = propInt(service, "AppleRawBatteryVoltage")
+                ?? propInt(service, "Voltage")
+                ?? 0
+            if v > 8000 {
+                r.voltageMV = v
+                // Discharge → negative current convention
+                let ma = Int((w / (Double(v) / 1000.0) * 1000.0).rounded())
+                let charging = propBool(service, "IsCharging") == true
+                r.amperageMA = charging ? ma : -ma
+            }
+        }
+        if let c = propBool(service, "IsCharging") { r.charging = c }
+        if let e = propBool(service, "ExternalConnected") { r.onAC = e }
+        return r
+    }
+
+    // MARK: Source 5 — pmset -g batt
 
     private static func readBatteryPmset() -> BatSourceReading {
         var r = BatSourceReading(name: "pmset")
@@ -1152,7 +1585,7 @@ final class PowerStore: ObservableObject {
         return r
     }
 
-    // MARK: Source 4 — ioreg AppleSmartBattery dump
+    // MARK: Source 6 — ioreg AppleSmartBattery dump (shell cross-check)
 
     private static func readBatteryIoreg() -> BatSourceReading {
         var r = BatSourceReading(name: "ioreg")
@@ -1199,9 +1632,21 @@ final class PowerStore: ObservableObject {
         let voltage = matchInt("\"AppleRawBatteryVoltage\"\\s*=\\s*(\\d+)")
             ?? matchInt("\"Voltage\"\\s*=\\s*(\\d+)")
         r.voltageMV = voltage
+        // InstantAmperage may appear as huge unsigned (two's complement) in ioreg text
         if let ampRaw = matchInt("\"InstantAmperage\"\\s*=\\s*(-?\\d+)")
             ?? matchInt("\"Amperage\"\\s*=\\s*(-?\\d+)") {
-            let signed = signedMA(ampRaw)
+            let signed: Int = {
+                if abs(ampRaw) <= 30_000 { return ampRaw }
+                // Parse as UInt64 bit pattern when value exceeds Int64 range representation
+                if let re = try? NSRegularExpression(pattern: "\"InstantAmperage\"\\s*=\\s*(\\d+)", options: []),
+                   let m = re.firstMatch(in: out, range: NSRange(out.startIndex..., in: out)),
+                   let r1 = Range(m.range(at: 1), in: out),
+                   let u = UInt64(out[r1]) {
+                    let s = Int64(bitPattern: u)
+                    if abs(s) <= 30_000 { return Int(s) }
+                }
+                return signedMA(ampRaw)
+            }()
             r.amperageMA = signed
             if let voltage, voltage > 0, signed != 0 {
                 r.chargeW = abs(Double(signed)) / 1000.0 * Double(voltage) / 1000.0
@@ -1237,46 +1682,63 @@ final class PowerStore: ObservableObject {
         return String(data: data, encoding: .utf8) ?? ""
     }
 
-    /// Merge 4 sources: median % when they agree, SmartBattery for hardware, IOPS/pmset for UX times.
+    /// Weighted merge across IOPS · SmartBattery · Gauge · Telemetry · (pmset · ioreg).
     private static func mergeBatterySources(_ readings: [BatSourceReading]) -> BatSnap {
         var snap = BatSnap()
         let ok = readings.filter(\.ok)
         snap.sourceNames = ok.map(\.name)
         snap.sourcesLabel = ok.map(\.name).joined(separator: " · ")
 
-        // Present if any source says yes
         snap.present = readings.contains { $0.present == true }
 
-        // Level: median of valid percents (robust to one bad source)
-        let levels = readings.compactMap { $0.level }.filter { $0 >= 0 && $0 <= 100 }.sorted()
-        if !levels.isEmpty {
-            snap.level = levels[levels.count / 2]
-            // If IOPS and SmartBattery both exist and are within 1%, prefer IOPS (menu bar match)
-            let iops = readings.first { $0.name == "IOPS" }?.level
-            let sb = readings.first { $0.name == "SmartBattery" }?.level
-            if let iops, let sb, abs(iops - sb) <= 1 {
-                snap.level = iops
-            } else if let iops, levels.allSatisfy({ abs($0 - iops) <= 3 }) {
-                snap.level = iops
-            }
+        let byName = Dictionary(uniqueKeysWithValues: readings.map { ($0.name, $0) })
+        let sb = byName["SmartBattery"]
+        let gauge = byName["Gauge"]
+        let iops = byName["IOPS"]
+        let telem = byName["Telemetry"]
+        let levels = readings.compactMap { $0.level }.filter { $0 >= 0 && $0 <= 100 }
+
+        // Weighted SOC: Raw mAh (SmartBattery) 50% · Gauge SOC 35% · IOPS 15%
+        // IOPS matches menu bar but lags; raw+gauge track the fuel gauge.
+        var weighted = 0.0
+        var wSum = 0.0
+        if let lv = sb?.level, lv >= 0, lv <= 100 {
+            weighted += Double(lv) * 0.50; wSum += 0.50
+        }
+        if let lv = gauge?.level, lv >= 0, lv <= 100 {
+            weighted += Double(lv) * 0.35; wSum += 0.35
+        }
+        if let lv = iops?.level, lv >= 0, lv <= 100 {
+            weighted += Double(lv) * 0.15; wSum += 0.15
+        }
+        if wSum > 0 {
+            snap.level = min(100, max(0, Int((weighted / wSum).rounded())))
+        } else if !levels.isEmpty {
+            snap.level = levels.sorted()[levels.count / 2]
         }
 
-        // Charging / AC: majority vote among sources that reported
-        let chargeVotes = readings.compactMap(\.charging)
-        if !chargeVotes.isEmpty {
-            let yes = chargeVotes.filter { $0 }.count
-            snap.charging = yes * 2 >= chargeVotes.count
+        // Charging / AC: prefer SmartBattery hardware flags
+        if let c = sb?.charging {
+            snap.charging = c
+        } else {
+            let chargeVotes = readings.compactMap(\.charging)
+            if !chargeVotes.isEmpty {
+                snap.charging = chargeVotes.filter { $0 }.count * 2 >= chargeVotes.count
+            }
         }
-        let acVotes = readings.compactMap(\.onAC)
-        if !acVotes.isEmpty {
-            let yes = acVotes.filter { $0 }.count
-            snap.onAC = yes * 2 >= acVotes.count
+        if let ac = sb?.onAC {
+            snap.onAC = ac || snap.charging
+        } else {
+            let acVotes = readings.compactMap(\.onAC)
+            if !acVotes.isEmpty {
+                snap.onAC = acVotes.filter { $0 }.count * 2 >= acVotes.count
+            }
         }
         if snap.charging { snap.onAC = true }
 
-        // Hardware enrichment: prefer SmartBattery, then ioreg
-        for name in ["SmartBattery", "ioreg"] {
-            if let s = readings.first(where: { $0.name == name }) {
+        // Hardware enrichment priority
+        for name in ["SmartBattery", "Gauge", "Telemetry", "ioreg", "IOPS", "pmset"] {
+            if let s = byName[name] {
                 if snap.cycles == nil { snap.cycles = s.cycles }
                 if snap.health == nil { snap.health = s.health }
                 if snap.rawMax == nil { snap.rawMax = s.rawMax }
@@ -1289,44 +1751,104 @@ final class PowerStore: ObservableObject {
             }
         }
 
-        // Minutes: prefer system sources (IOPS, pmset, SmartBattery, ioreg) median; live draw last
-        let systemMins = readings.compactMap(\.minutes).filter { $0 > 0 && $0 < 65535 }.sorted()
+        // Prefer SmartBattery signed InstantAmperage when present
+        if let amp = sb?.amperageMA { snap.amperageMA = amp }
+        if let v = sb?.voltageMV { snap.voltageMV = v }
+
+        // Watts: InstantAmperage×V is primary; Telemetry SystemLoad fills gaps / validates
+        if let amp = snap.amperageMA, let v = snap.voltageMV, v > 0, abs(amp) >= 20 {
+            let wAmp = abs(Double(amp)) / 1000.0 * Double(v) / 1000.0
+            if wAmp > 0.08 {
+                if let tw = telem?.chargeW, tw > 0.15 {
+                    // Blend when within 40%; else prefer amperage (direct pack current)
+                    let ratio = tw / max(wAmp, 0.01)
+                    if ratio > 0.6 && ratio < 1.5 {
+                        snap.chargeW = wAmp * 0.65 + tw * 0.35
+                    } else {
+                        snap.chargeW = wAmp
+                    }
+                } else {
+                    snap.chargeW = wAmp
+                }
+            }
+        } else if let tw = telem?.chargeW, tw > 0.15 {
+            snap.chargeW = tw
+            if snap.amperageMA == nil { snap.amperageMA = telem?.amperageMA }
+        }
+
+        // System minutes (secondary)
+        let charging = snap.charging
+        let systemMins = readings.compactMap(\.minutes)
+            .compactMap { sanitizeMinutes($0, charging: charging, onAC: snap.onAC) }
+            .sorted()
         if !systemMins.isEmpty {
             snap.minutes = systemMins[systemMins.count / 2]
             snap.minutesIsLiveEstimate = false
         }
 
-        // Live pack-draw estimate if system still calculating
-        if snap.minutes == nil || snap.minutes == 0 {
-            if let live = computeLiveRemainingMinutes(snap) {
+        // Live pack-draw estimate (primary when solid)
+        if let live = computeLiveRemainingMinutes(snap) {
+            if let sys = snap.minutes {
+                let ratio = Double(sys) / Double(max(1, live))
+                if ratio < 0.65 || ratio > 1.55 {
+                    snap.minutes = live
+                    snap.minutesIsLiveEstimate = true
+                } else {
+                    snap.minutes = Int((Double(live) * 0.60 + Double(sys) * 0.40).rounded())
+                    snap.minutesIsLiveEstimate = true
+                }
+            } else {
                 snap.minutes = live
                 snap.minutesIsLiveEstimate = true
             }
         }
 
-        // Desktop: no source reported a battery
+        snap.minutes = sanitizeMinutes(snap.minutes, charging: snap.charging, onAC: snap.onAC)
+
         if !snap.present && levels.isEmpty {
             snap.present = false
-        } else if !levels.isEmpty {
+        } else if !levels.isEmpty || snap.rawCurrent != nil {
             snap.present = true
         }
 
         return finalizeBatterySnap(snap)
     }
 
-    /// mAh / |mA| → minutes (discharge or charge).
+    /// mAh / |mA| → minutes, with Wh/W fallback. Requires real draw.
     private static func computeLiveRemainingMinutes(_ snap: BatSnap) -> Int? {
-        guard let amp = snap.amperageMA, abs(amp) >= 40 else { return nil }
-        guard let raw = snap.rawCurrent, let mx = snap.rawMax, mx > 0 else { return nil }
-        let ma = abs(Double(amp))
-        if snap.charging && amp > 0 {
-            let need = Double(max(0, mx - raw))
-            let mins = Int((need / ma * 60.0).rounded())
-            return (mins > 0 && mins < 65535) ? mins : nil
+        guard let raw = snap.rawCurrent, let mx = snap.rawMax, mx > 50, raw >= 0 else { return nil }
+        let remaining = Double(min(raw, mx))
+        let need = Double(max(0, mx - raw))
+
+        // Path A: signed milliamps
+        if let amp = snap.amperageMA {
+            let ma = abs(Double(amp))
+            if ma >= minLiveAmpMA {
+                if snap.charging && amp > 0 {
+                    guard need > 5 else { return 1 }
+                    let mins = Int((need / ma * 60.0).rounded())
+                    return sanitizeMinutes(mins, charging: true, onAC: true)
+                }
+                if !snap.charging && !snap.onAC && amp < 0 {
+                    let mins = Int((remaining / ma * 60.0).rounded())
+                    return sanitizeMinutes(mins, charging: false, onAC: false)
+                }
+            }
         }
-        if !snap.charging && !snap.onAC && amp < 0 {
-            let mins = Int((Double(raw) / ma * 60.0).rounded())
-            return (mins > 0 && mins < 65535) ? mins : nil
+
+        // Path B: pack watts + voltage → equivalent mA
+        if snap.chargeW >= minLiveChargeW, let v = snap.voltageMV, v > 8000 {
+            let ma = snap.chargeW / (Double(v) / 1000.0) * 1000.0 // W / V = A → mA
+            guard ma >= minLiveAmpMA else { return nil }
+            if snap.charging {
+                guard need > 5 else { return 1 }
+                let mins = Int((need / ma * 60.0).rounded())
+                return sanitizeMinutes(mins, charging: true, onAC: true)
+            }
+            if !snap.onAC {
+                let mins = Int((remaining / ma * 60.0).rounded())
+                return sanitizeMinutes(mins, charging: false, onAC: false)
+            }
         }
         return nil
     }
@@ -1338,6 +1860,7 @@ final class PowerStore: ObservableObject {
         if s.sourcesLabel.isEmpty, !s.sourceNames.isEmpty {
             s.sourcesLabel = s.sourceNames.joined(separator: " · ")
         }
+        s.minutes = sanitizeMinutes(s.minutes, charging: s.charging, onAC: s.onAC)
         return s
     }
 
@@ -2102,10 +2625,14 @@ enum BatteryMenuChrome {
             if estimatedWatts >= 1 { return String(format: "%.1f W", estimatedWatts) }
             return String(format: "%.2f W", estimatedWatts)
         }
+        return batFiEnergyLabel(cpuPercent: cpuPercent)
+    }
+
+    /// BatFi-style only: High / Moderate / Low (no watts, no Idle).
+    static func batFiEnergyLabel(cpuPercent: Double) -> String {
         if cpuPercent >= 80 { return "High" }
         if cpuPercent >= 25 { return "Moderate" }
-        if cpuPercent >= 5 { return "Low" }
-        return "Idle"
+        return "Low"
     }
 
     static func batterySymbol(level: Int, charging: Bool, onAC: Bool, present: Bool) -> String {
@@ -2268,7 +2795,7 @@ enum FathomStatusCopy {
     }
 }
 
-/// Compact label | value row — matches product mock spacing
+/// Compact label | value row — BatFi spacing (15pt SF, airy vertical)
 struct StatusKVRow: View {
     let label: String
     let value: String
@@ -2276,7 +2803,7 @@ struct StatusKVRow: View {
         HStack(alignment: .firstTextBaseline, spacing: 16) {
             Text(label)
                 .font(.system(size: 15, weight: .regular))
-                .foregroundColor(Color.white.opacity(0.42))
+                .foregroundColor(Color.white.opacity(0.45))
             Spacer(minLength: 12)
             Text(value)
                 .font(.system(size: 15, weight: .regular))
@@ -2285,7 +2812,22 @@ struct StatusKVRow: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
         }
-        .padding(.vertical, 13)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+    }
+}
+
+/// BatFi section title under a hairline
+struct BatFiSectionTitle: View {
+    let title: String
+    var body: some View {
+        Text(title)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(Color.white.opacity(0.45))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 18)
+            .padding(.top, 10)
+            .padding(.bottom, 2)
     }
 }
 
@@ -2305,6 +2847,9 @@ final class MenuPanelModel: ObservableObject {
     @Published var timeDetail = "—"
     @Published var powerSource = "—"
     @Published var lowPower = false
+    @Published var statusText = "—"
+    @Published var cycleCount: Int?
+    @Published var healthPercent: Int?
     @Published var spark: [Double] = []
     @Published var sparkLabel = "Power"
     @Published var topApps: [ProcEnergy] = []
@@ -2349,6 +2894,10 @@ final class MenuPanelModel: ObservableObject {
         if powerSource != ps { powerSource = ps; dirty = true }
         let lp = ProcessInfo.processInfo.isLowPowerModeEnabled
         if lowPower != lp { lowPower = lp; dirty = true }
+        let st = p.statusText
+        if statusText != st { statusText = st; dirty = true }
+        if cycleCount != p.cycleCount { cycleCount = p.cycleCount; dirty = true }
+        if healthPercent != p.healthPercent { healthPercent = p.healthPercent; dirty = true }
 
         // Spark: max 40 pts, update only when package ticks
         let src = p.wattHistorySpark
@@ -2421,230 +2970,151 @@ struct MainRoot: View {
         )
     }
 
+    /// Time label/value like BatFi (e.g. "Time Remaining" / "3:45").
+    private var batFiTimeParts: (label: String, value: String)? {
+        if !ui.batteryPresent { return nil }
+        let t = ui.timeDetail
+        if ui.isCharging {
+            if t == "—" || t.isEmpty || t == "Calculating…" {
+                return ("Time to Full", "Calculating…")
+            }
+            return ("Time to Full", shortTime(t))
+        }
+        if ui.isOnAC {
+            if ui.levelPercent >= 100 { return ("Status", "Fully Charged") }
+            return ("Status", t == "—" ? "On Power Adapter" : t)
+        }
+        if t == "—" || t.isEmpty || t == "Calculating…" {
+            return ("Time Remaining", "Calculating…")
+        }
+        return ("Time Remaining", shortTime(t))
+    }
+
+    /// App Mode line (BatFi shows charging override mode; Fathom maps system state).
+    private var batFiAppMode: String {
+        if !ui.batteryPresent { return "Desktop · AC only" }
+        if ui.lowPower { return "Low Power Mode" }
+        if ui.isCharging { return "Charging" }
+        if ui.isOnAC {
+            return ui.levelPercent >= 100 ? "Fully Charged" : "Connected to Power"
+        }
+        return "Discharging"
+    }
+
+    private func shortTime(_ raw: String) -> String {
+        // Keep compact "Xh Ym" / "H:MM" style; strip "remaining"/"until full" suffixes
+        var s = raw
+        for drop in [" remaining", " remaining.", " until full", " left"] {
+            if let r = s.range(of: drop, options: .caseInsensitive) { s.removeSubrange(r) }
+        }
+        return s.trimmingCharacters(in: .whitespaces)
+    }
+
+    private func appIcon(for p: ProcEnergy) -> NSImage {
+        if !p.path.isEmpty, FileManager.default.fileExists(atPath: p.path) {
+            return NSWorkspace.shared.icon(forFile: p.path)
+        }
+        return NSWorkspace.shared.icon(for: .applicationBundle)
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // ── Hero ─────────────────────────────────────────
-            HStack(alignment: .center, spacing: chromeStyle.isNewer ? 14 : 12) {
-                Image(systemName: BatteryMenuChrome.batterySymbol(
-                    level: ui.levelPercent,
-                    charging: ui.isCharging,
-                    onAC: ui.isOnAC,
-                    present: ui.batteryPresent
-                ))
-                .font(.system(size: chromeStyle.heroIcon, weight: .regular))
-                .foregroundColor(BatteryMenuChrome.tintSwiftUI(battTint))
-                .symbolRenderingMode(.hierarchical)
-                .frame(width: chromeStyle.heroIcon + 8, height: chromeStyle.heroIcon)
-
-                VStack(alignment: .leading, spacing: chromeStyle.isNewer ? 4 : 3) {
-                    Text(ui.batteryPresent ? "\(ui.levelPercent)%" : "AC")
-                        .font(uiFont(chromeStyle.heroPct, weight: .semibold))
-                        .foregroundColor(.labelPrimary)
-                        .monospacedDigit()
-                    Text(ui.timeDetail)
-                        .font(uiFont(FathomType.caption, weight: .regular))
-                        .foregroundColor(.labelSecondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-                Spacer(minLength: 6)
-                Button {
-                    NotificationCenter.default.post(name: .fathomClosePopover, object: nil)
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: FathomType.label, weight: .semibold))
-                        .foregroundColor(.labelSecondary)
-                        .frame(width: 28, height: 28)
-                        .background(Circle().fill(Color.white.opacity(0.08)))
-                }
-                .buttonStyle(.plain)
-                .help("Close (Esc)")
-                .keyboardShortcut(.escape, modifiers: [])
-            }
-            .padding(.horizontal, padH)
-            .padding(.top, chromeStyle.isNewer ? 16 : 18)
-            .padding(.bottom, chromeStyle.isNewer ? 12 : 14)
-
-            // Live watts strip
-            if ui.packageWatts > 0.05 || ui.chargeWatts > 0.05 {
-                HStack(spacing: 12) {
-                    wattsChip(title: "Power draw", value: ui.packageWatts)
-                    if ui.isCharging {
-                        wattsChip(title: "Charging", value: ui.chargeWatts)
-                    } else if ui.chargeWatts > 0.05 && !ui.isOnAC {
-                        wattsChip(title: "Battery draw", value: ui.chargeWatts)
+        // Exact BatFi MenuContent layout (rurza/BatFi BatteryInfoView + HighEnergyUsage + menu actions)
+        ScrollView(showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 12) {
+                // ── Battery info block ──
+                VStack(alignment: .leading, spacing: 8) {
+                    BatFiMainRow(
+                        label: "Battery",
+                        value: ui.batteryPresent ? "\(ui.levelPercent)%" : "—",
+                        emphasizeValue: true
+                    )
+                    if let time = batFiTimeParts {
+                        BatFiDetailRow(label: time.label, value: time.value)
                     }
-                    Spacer(minLength: 0)
+                    BatFiDetailRow(label: "App Mode", value: batFiAppMode)
                 }
-                .padding(.horizontal, padH)
-                .padding(.bottom, FathomSpace.section - 2)
-            }
 
-            if ui.spark.count >= 3 {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text(ui.sparkLabel)
-                            .font(uiFont(FathomType.label, weight: .medium))
-                            .foregroundColor(.labelTertiary)
-                            .lineLimit(1)
-                        Spacer(minLength: 4)
-                        Text(String(format: "%.1f W", ui.packageWatts))
-                            .font(uiFont(FathomType.label, weight: .medium))
-                            .foregroundColor(.labelSecondary)
-                            .monospacedDigit()
+                BatFiSeparator()
+
+                // ── Additional battery stats ──
+                VStack(alignment: .leading, spacing: 8) {
+                    BatFiDetailRow(label: "Power Source", value: ui.powerSource)
+                    if let cycles = ui.cycleCount {
+                        BatFiDetailRow(label: "Cycle Count", value: "\(cycles)")
                     }
-                    Sparkline(values: ui.spark, color: .labelPrimary)
-                        .frame(height: chromeStyle.isNewer ? 40 : 36)
-                        .drawingGroup(opaque: false)
-                        .padding(.vertical, 4)
-                        .padding(.horizontal, 4)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(Color.white.opacity(0.04))
+                    if let health = ui.healthPercent {
+                        BatFiDetailRow(label: "Battery Capacity", value: "\(health)%")
+                    }
+                    BatFiDetailRow(
+                        label: "Low Power Mode",
+                        value: ui.lowPower ? "On" : "Off"
+                    )
+                    if ui.packageWatts > 0.05 {
+                        BatFiDetailRow(
+                            label: "Power Draw",
+                            value: String(format: "%.1f W", ui.packageWatts)
                         )
+                    }
                 }
-                .padding(.horizontal, padH)
-                .padding(.bottom, FathomSpace.section)
-            }
+                .frame(maxWidth: .infinity)
 
-            MenuHairline().padding(.horizontal, FathomSpace.hairline)
+                BatFiSeparator()
 
-            // ── Middle: scrolls so hero + why footer always stay on screen ──
-            ScrollView(showsIndicators: true) {
-                VStack(alignment: .leading, spacing: 0) {
-                    MenuSectionHeader(title: "Power Source")
-                        .padding(.horizontal, padH)
-                    Text(ui.powerSource)
-                        .font(uiFont(FathomType.body, weight: .regular))
-                        .foregroundColor(.labelPrimary)
-                        .padding(.horizontal, padH)
-                        .padding(.bottom, FathomSpace.section)
+                // ── High Energy Usage (BatFi section) ──
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("High Energy Usage")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
 
-                    MenuHairline().padding(.horizontal, FathomSpace.hairline)
-
-                    MenuSectionHeader(title: "Energy Mode")
-                        .padding(.horizontal, padH)
-                    Button {
-                        BatteryMenuChrome.openBatterySettings()
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: ui.lowPower ? "leaf.fill" : "leaf")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundColor(.labelPrimary)
-                                .frame(width: 22, height: 22)
-                                .background(Circle().fill(Color.white.opacity(0.08)))
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Low Power Mode")
-                                    .font(uiFont(FathomType.body, weight: .regular))
-                                    .foregroundColor(.labelPrimary)
-                                Text("Open Battery Settings…")
-                                    .font(uiFont(FathomType.label, weight: .regular))
-                                    .foregroundColor(.labelTertiary)
-                            }
-                            Spacer()
-                            Text(ui.lowPower ? "On" : "Off")
-                                .font(uiFont(FathomType.body, weight: .regular))
-                                .foregroundColor(.labelSecondary)
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: FathomType.label, weight: .semibold))
-                                .foregroundColor(.labelTertiary)
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, padH)
-                    .padding(.bottom, FathomSpace.section)
-
-                    MenuHairline().padding(.horizontal, FathomSpace.hairline)
-
-                    MenuSectionHeader(title: FathomCopy.whatsUsingPower)
-                        .padding(.horizontal, padH)
-                    Text("Package × CPU share · multi-core %")
-                        .font(uiFont(FathomType.label, weight: .regular))
-                        .foregroundColor(.labelTertiary)
-                        .padding(.horizontal, padH)
-                        .padding(.bottom, FathomSpace.row)
                     if ui.topApps.isEmpty {
-                        Text(whyLoaded ? FathomCopy.nothingHeavy : "Sampling…")
-                            .font(uiFont(FathomType.body, weight: .regular))
-                            .foregroundColor(.labelSecondary)
-                            .padding(.horizontal, padH)
-                            .padding(.bottom, FathomSpace.section)
+                        Text(whyLoaded ? "None" : "Loading…")
+                            .font(.callout)
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 4)
                     } else {
-                        ForEach(ui.topApps) { p in
-                            HStack(spacing: 10) {
-                                Text(p.name)
-                                    .font(uiFont(FathomType.body, weight: .regular))
-                                    .foregroundColor(.labelPrimary)
-                                    .lineLimit(1)
-                                Spacer(minLength: 8)
-                                Text(String(format: "%.0f%%", min(p.cpuPercent, 999)))
-                                    .font(uiFont(FathomType.micro, weight: .medium))
-                                    .foregroundColor(.labelTertiary)
-                                    .monospacedDigit()
-                                    .frame(width: 40, alignment: .trailing)
-                                Text(BatteryMenuChrome.energyLabel(cpuPercent: p.cpuPercent, estimatedWatts: p.estimatedWatts))
-                                    .font(uiFont(FathomType.caption, weight: .semibold))
-                                    .foregroundColor(.labelPrimary)
-                                    .monospacedDigit()
-                                    .frame(minWidth: 48, alignment: .trailing)
+                        VStack(spacing: 6) {
+                            ForEach(ui.topApps.prefix(5)) { p in
+                                HStack(spacing: 8) {
+                                    Image(nsImage: appIcon(for: p))
+                                        .resizable()
+                                        .frame(width: 24, height: 24)
+                                    Text(p.name)
+                                        .font(.callout)
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(1)
+                                    Spacer(minLength: 8)
+                                    Text(BatteryMenuChrome.batFiEnergyLabel(cpuPercent: p.cpuPercent))
+                                        .font(.callout)
+                                        .foregroundColor(.secondary)
+                                        .monospacedDigit()
+                                }
                             }
-                            .padding(.horizontal, padH)
-                            .padding(.vertical, FathomSpace.row)
                         }
-                        .padding(.bottom, FathomSpace.section - 2)
                     }
+                }
+                .frame(maxWidth: .infinity)
 
-                    MenuHairline().padding(.horizontal, FathomSpace.hairline)
+                BatFiSeparator()
 
-                    HStack(spacing: 10) {
-                        Button {
-                            NotificationCenter.default.post(name: .fathomOpenDashboard, object: nil)
-                        } label: {
-                            Text(FathomCopy.fullWindow)
-                                .font(uiFont(FathomType.caption, weight: .semibold))
-                                .foregroundColor(.bg)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 12)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                        .fill(Color.labelPrimary)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        Button {
-                            BatteryMenuChrome.openBatterySettings()
-                        } label: {
-                            Text("Settings")
-                                .font(uiFont(FathomType.caption, weight: .medium))
-                                .foregroundColor(.labelPrimary)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 12)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                        .fill(Color.card)
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                        .stroke(Color.border, lineWidth: 0.5)
-                                )
-                        }
-                        .buttonStyle(.plain)
+                // ── Menu actions (BatFi: Settings / Quit style) ──
+                VStack(alignment: .leading, spacing: 2) {
+                    BatFiMenuAction(title: FathomCopy.fullWindow, showChevron: true) {
+                        NotificationCenter.default.post(name: .fathomOpenDashboard, object: nil)
                     }
-                    .padding(.horizontal, padH)
-                    .padding(.bottom, 12)
-
-                    MenuRowButton(title: showMore ? "Hide settings" : "More settings…") {
-                        withAnimation(.easeInOut(duration: 0.15)) { showMore.toggle() }
+                    BatFiMenuAction(title: "Open Battery Settings…", showChevron: true) {
+                        BatteryMenuChrome.openBatterySettings()
                     }
-                    .padding(.horizontal, padH)
-                    .padding(.bottom, showMore ? 6 : 16)
+                    BatFiMenuAction(title: showMore ? "Hide Settings" : "Settings…", showChevron: !showMore) {
+                        withAnimation(.easeInOut(duration: 0.12)) { showMore.toggle() }
+                    }
 
                     if showMore {
-                        VStack(alignment: .leading, spacing: FathomSpace.section) {
+                        VStack(alignment: .leading, spacing: 10) {
                             Text("Menu bar shows")
-                                .font(uiFont(FathomType.micro, weight: .medium))
-                                .foregroundColor(.labelTertiary)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
                             Picker("", selection: Binding(
                                 get: { MenuBarDisplayMode.current },
                                 set: { MenuBarDisplayMode.set($0) }
@@ -2654,201 +3124,81 @@ struct MainRoot: View {
                             }
                             .pickerStyle(.segmented)
                             .labelsHidden()
-                            Text("Time = how long left. W = how hard your Mac is working.")
-                                .font(uiFont(FathomType.label))
-                                .foregroundColor(.labelTertiary)
-                                .fixedSize(horizontal: false, vertical: true)
-
-                            Text("Menu style")
-                                .font(uiFont(FathomType.micro, weight: .medium))
-                                .foregroundColor(.labelTertiary)
-                            Picker("", selection: Binding(
-                                get: { chromeStyle },
-                                set: {
-                                    chromeStyle = $0
-                                    MenuChromeStyle.set($0)
-                                }
-                            )) {
-                                ForEach(MenuChromeStyle.allCases, id: \.self) { s in
-                                    Text(s.title).tag(s)
-                                }
-                            }
-                            .pickerStyle(.segmented)
-                            .labelsHidden()
-                            Text(chromeStyle.isNewer
-                                  ? "Newer: denser compact chrome with a large charge readout."
-                                  : "Original: Fathom’s default balanced menu layout.")
-                                .font(uiFont(FathomType.label))
-                                .foregroundColor(.labelTertiary)
-                                .fixedSize(horizontal: false, vertical: true)
 
                             Toggle(isOn: Binding(
                                 get: { SystemBatteryMenuHider.isEnabled },
                                 set: { SystemBatteryMenuHider.isEnabled = $0 }
                             )) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(FathomCopy.useFathomAsBattery)
-                                        .font(uiFont(12, weight: .regular))
-                                        .foregroundColor(.labelPrimary)
-                                    Text("Hides Apple’s battery icon while Fathom is open.")
-                                        .font(uiFont(10))
-                                        .foregroundColor(.labelTertiary)
-                                }
+                                Text(FathomCopy.useFathomAsBattery)
+                                    .font(.callout)
                             }
                             .toggleStyle(.switch)
-                            .tint(Color.white.opacity(0.55))
 
                             Toggle(isOn: Binding(
                                 get: { LaunchAtLoginHelper.isEnabled },
                                 set: { LaunchAtLoginHelper.isEnabled = $0 }
                             )) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Launch at Login")
-                                        .font(uiFont(12, weight: .regular))
-                                        .foregroundColor(.labelPrimary)
-                                    Text("Start Fathom when you log in.")
-                                        .font(uiFont(10))
-                                        .foregroundColor(.labelTertiary)
-                                }
+                                Text("Launch at Login")
+                                    .font(.callout)
                             }
                             .toggleStyle(.switch)
-                            .tint(Color.white.opacity(0.55))
 
                             Toggle(isOn: Binding(
                                 get: { DrainAlertMonitor.isEnabled },
                                 set: { DrainAlertMonitor.isEnabled = $0 }
                             )) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Warn me when battery drains fast")
-                                        .font(uiFont(12, weight: .regular))
-                                        .foregroundColor(.labelPrimary)
-                                    Text("Local notification if drop ≥ \(DrainAlertMonitor.dropPercent)% in \(DrainAlertMonitor.windowMinutes) min.")
-                                        .font(uiFont(10, weight: .regular))
-                                        .foregroundColor(.labelTertiary)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
+                                Text("Warn on fast drain")
+                                    .font(.callout)
                             }
                             .toggleStyle(.switch)
-                            .tint(Color.white.opacity(0.55))
 
                             VStack(alignment: .leading, spacing: 4) {
-                                Text("Critical battery (red icon) at \(Int(criticalPct))%")
-                                    .font(uiFont(12, weight: .regular))
-                                    .foregroundColor(.labelPrimary)
-                                Text("Yellow = Low Power Mode · Green = charging · Red = at/below this % on battery.")
-                                    .font(uiFont(10))
-                                    .foregroundColor(.labelTertiary)
-                                    .fixedSize(horizontal: false, vertical: true)
+                                Text("Critical battery at \(Int(criticalPct))%")
+                                    .font(.callout)
                                 Slider(value: $criticalPct, in: 5...50, step: 1)
-                                    .tint(Color(red: 0.96, green: 0.28, blue: 0.28))
                                     .onChange(of: criticalPct) { _, v in
                                         BatteryMenuChrome.criticalBatteryPercent = Int(v)
                                     }
                             }
 
-                            Text("⌘-drag the icon to move it. " + FathomCopy.doubleClickHint + ". Press Esc to close.")
-                                .font(uiFont(11))
-                                .foregroundColor(.labelTertiary)
-                                .fixedSize(horizontal: false, vertical: true)
-
-                            Slider(value: Binding(
-                                get: { MenuBarPositionStore.normalized },
-                                set: { MenuBarPositionStore.normalized = $0 }
-                            ), in: 0...1)
-                            .tint(Color.white.opacity(0.55))
-
-                            MenuRowButton(
-                                title: RNitroLink.isInstalled ? "Open rNitro" : "Get rNitro…",
-                                systemImage: "gauge.with.dots.needle.67percent"
-                            ) {
-                                RNitroLink.openOrInstall()
-                            }
-
                             HStack(spacing: 8) {
-                                MinimalButton(title: "Updates") { UpdateChecker.checkManually() }
-                                MinimalButton(title: "Website") { NSWorkspace.shared.open(UPDATE_PAGE_URL) }
+                                Button("Updates") { UpdateChecker.checkManually() }
+                                    .buttonStyle(.bordered)
+                                Button("Website") { NSWorkspace.shared.open(UPDATE_PAGE_URL) }
+                                    .buttonStyle(.bordered)
                             }
                             Text(UpdateChecker.displayLabel(FATHOM_VERSION))
-                                .font(uiFont(11))
-                                .foregroundColor(.labelTertiary)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
                         }
-                        .padding(.horizontal, padH)
-                        .padding(.bottom, 16)
-                        .padding(.top, 4)
+                        .padding(.top, 6)
+                        .padding(.bottom, 4)
                     }
-                }
-                .padding(.top, 6)
-                .padding(.bottom, 12)
-            }
-            // Middle fills leftover space; never pushes hero/footer off-screen
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
-            // ── Why drain? always pinned bottom ──
-            MenuHairline()
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 8) {
-                    Text(FathomCopy.whyBatteryDropped)
-                        .font(uiFont(FathomType.caption, weight: .semibold))
-                        .foregroundColor(.labelSecondary)
-                        .lineLimit(1)
-                    Spacer(minLength: 4)
-                    Button {
-                        loadWhy(force: true)
-                        refreshedWhy = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { refreshedWhy = false }
-                    } label: {
-                        Text(refreshedWhy ? "Updated" : "Refresh")
-                            .font(uiFont(FathomType.micro, weight: .medium))
-                            .foregroundColor(.labelTertiary)
-                    }
-                    .buttonStyle(.plain)
-                }
-                let cold = whySummary.contains("Not enough local history") || whySummary.contains("not enough")
-                Text(whySummary.isEmpty ? "…" : (cold ? FathomCopy.whyCold : whySummary))
-                    .font(uiFont(FathomType.caption, weight: .regular))
-                    .foregroundColor(.labelPrimary)
-                    .lineLimit(3)
-                    .truncationMode(.tail)
-                if whyDrop > 0 {
-                    Text("~\(whyDrop)% · \(whyWindow)")
-                        .font(uiFont(FathomType.micro, weight: .regular))
-                        .foregroundColor(.labelSecondary)
-                        .lineLimit(1)
-                }
-                if let name = whyCulprit {
-                    HStack(spacing: 8) {
-                        Text(name)
-                            .font(uiFont(FathomType.micro, weight: .regular))
-                            .foregroundColor(.labelSecondary)
-                            .lineLimit(1)
-                        Spacer(minLength: 4)
-                        Text(whyNote ?? "")
-                            .font(uiFont(FathomType.micro, weight: .regular))
-                            .foregroundColor(.labelTertiary)
-                            .lineLimit(1)
+                    BatFiMenuAction(title: "Quit Fathom") {
+                        NotificationCenter.default.post(name: .fathomClosePopover, object: nil)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                            NSApp.terminate(nil)
+                        }
                     }
                 }
-                Text("Esc to close · double-click icon for full window")
-                    .font(uiFont(FathomType.label, weight: .regular))
-                    .foregroundColor(.labelTertiary)
-                    .padding(.top, 2)
             }
-            .padding(.horizontal, padH)
-            .padding(.top, 12)
-            .padding(.bottom, 14)
-            .background(Color.white.opacity(0.03))
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
         }
-        // Exact NSPopover size — prevents clipping at screen edges
         .frame(width: panelWidth, height: panelHeight, alignment: .top)
-        .background(Color.bg)
+        .background(Color(nsColor: .windowBackgroundColor))
         .preferredColorScheme(.dark)
         .transaction { $0.animation = nil }
+        .onExitCommand {
+            NotificationCenter.default.post(name: .fathomClosePopover, object: nil)
+        }
         .sheet(isPresented: $showOnboarding) {
             FathomOnboardingSheet(isPresented: $showOnboarding)
         }
         .onAppear {
-            chromeStyle = MenuChromeStyle.current
-            // Never block first paint with disk why-analysis
+            chromeStyle = .newer
+            MenuChromeStyle.set(.newer)
             if !whyLoaded { loadWhy(force: false) }
             if !FathomOnboarding.hasSeen { showOnboarding = true }
         }
@@ -4567,7 +4917,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             ?? NSScreen.main
         let visH = screen?.visibleFrame.height ?? 700
         // Leave air under menu bar and above dock; clamp for tiny displays (e.g. laptop + notch)
-        let h = min(500, max(360, visH - 80))
+        // BatFi-like menu: compact fixed height, clamp for short screens
+        let h = min(520, max(400, visH - 100))
         return NSSize(width: kPopoverWidth, height: h)
     }
 
@@ -5016,15 +5367,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private static func installPowerEventObservers() {
         let center = NSWorkspace.shared.notificationCenter
-        let map: [(NSNotification.Name, String)] = [
-            (NSWorkspace.screensDidSleepNotification, "display_sleep"),
-            (NSWorkspace.screensDidWakeNotification, "display_wake"),
-            (NSWorkspace.willSleepNotification, "system_sleep"),
-            (NSWorkspace.didWakeNotification, "system_wake"),
+        let map: [(NSNotification.Name, String, Bool?)] = [
+            (NSWorkspace.screensDidSleepNotification, "display_sleep", false),
+            (NSWorkspace.screensDidWakeNotification, "display_wake", true),
+            (NSWorkspace.willSleepNotification, "system_sleep", false),
+            (NSWorkspace.didWakeNotification, "system_wake", true),
         ]
-        for (name, event) in map {
+        for (name, event, wake) in map {
             center.addObserver(forName: name, object: nil, queue: .main) { _ in
                 DrainLog.shared.recordEvent(event)
+                if let wake {
+                    PowerStore.shared.notePowerTransition(wake: wake)
+                }
             }
         }
     }

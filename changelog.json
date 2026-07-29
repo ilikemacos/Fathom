@@ -1,39 +1,12 @@
-{
-  "whats_new": [
-    {
-      "channel": "beta",
-      "title": "v0.2.1 Beta \u2014 better sensors",
-      "accent": "cyan",
-      "items": [
-        {
-          "strong": "IOReport package watts",
-          "text": " \u2014 real Energy Model CPU power when available (sensor vs estimate shown)."
-        },
-        {
-          "strong": "Sleep/wake log",
-          "text": " \u2014 display & system sleep/wake in drain timeline + Why Drain? notes."
-        }
-      ]
-    }
-  ],
-  "releases": [
-    {
-      "title": "v0.2.1 Beta",
-      "body_html": "<strong style=\"color:var(--cyan);\">Sensors</strong> \u2014 IOReport package power + sleep/wake attribution."
-    },
-    {
-      "title": "v0.2.0 Beta",
-      "body_html": "Auto-update + rNitro-style UI."
-    }
-  ],
-  "entries": [
-    {
-      "version": "v0.2.21-Beta",
-      "notes": "Launch at Login (SMAppService). Toggle in More settings + dashboard Settings."
-    },
-    {
-      "version": "v0.2.20-Beta",
-      "notes": "Extreme idle optimization: <5% CPU target. Shell battery (pmset/ioreg) off hot path; 6\u201310s idle polls; process scan 20s idle; no dual IOReport sleep; throttled SwiftUI/history/disk; timer tolerance."
-    }
-  ]
-}
+[
+  {
+    "version": "v0.2.31-Beta",
+    "date": "2026-07-30",
+    "notes": [
+      "Six battery sources (IOPS, SmartBattery raw, Gauge SOC, PowerTelemetry, pmset, ioreg)",
+      "Correct signed InstantAmperage for pack watts & time remaining",
+      "Weighted SOC merge (raw 50% \u00b7 gauge 35% \u00b7 IOPS 15%)",
+      "BatFi-style menubar"
+    ]
+  }
+]

@@ -1,25 +1,28 @@
 {
-  "latest": "v0.2.26-Beta",
-  "beta": "v0.2.26-Beta",
-  "experimental": "v0.2.26-Experimental",
+  "latest": "v0.2.31-Beta",
+  "beta": "v0.2.31-Beta",
+  "experimental": "v0.2.31-Experimental",
   "releases": {
     "beta": {
-      "label": "v0.2.26 Beta",
-      "short": "v0.2.26",
-      "sh": "Fathom-v0.2.26-Beta.sh",
+      "label": "v0.2.31 Beta",
+      "short": "v0.2.31",
+      "sh": "Fathom-v0.2.31-Beta.sh",
       "source_sh": "install-fathom.sh",
-      "zip": "Fathom-v0.2.26-Beta.zip"
+      "zip": "Fathom-v0.2.31-Beta.zip"
     },
     "experimental": {
-      "label": "v0.2.26 Experimental",
-      "short": "v0.2.26-Exp",
-      "sh": "Fathom-v0.2.26-Experimental.sh",
+      "label": "v0.2.31 Experimental",
+      "short": "v0.2.31-Exp",
+      "sh": "Fathom-v0.2.31-Experimental.sh",
       "source_sh": "install-fathom.sh",
-      "zip": "Fathom-v0.2.26-Experimental.zip"
+      "zip": "Fathom-v0.2.31-Experimental.zip"
     }
   },
   "hashes": {
-    "beta_sh": "2d54164272fe6f4ad31b3d4b2dc11bf1622e8d7afe45c8d528dbe1eaf20f1367",
-    "beta_zip": "f0c9c8be6003a4e8a30702f03edc2f647e4a9a91b322cd77310d91cbd5d8d4ef"
-  }
+    "beta_sh": "fc7bc9085c5f23842b979dabbfc92b4e87bdd31d85c5f54ab8247c6be44dd5fa",
+    "beta_zip": "acdd5d68cd9f2abc125b4d3499e5f9f3a2d3205abc9cea1a9ece9e07ac1f70bf",
+    "experimental_sh": "fc7bc9085c5f23842b979dabbfc92b4e87bdd31d85c5f54ab8247c6be44dd5fa",
+    "experimental_zip": "acdd5d68cd9f2abc125b4d3499e5f9f3a2d3205abc9cea1a9ece9e07ac1f70bf"
+  },
+  "notes": "Six battery sources: IOPS, SmartBattery raw mAh, Gauge SOC, PowerTelemetry, pmset, ioreg. Signed InstantAmperage fix."
 }

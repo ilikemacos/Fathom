@@ -1,24 +1,19 @@
 # Fathom
 
-Local-only **macOS menu bar battery monitor** — original-style menu, optional denser **Newer** layout, package watts, and why-drain attribution.
+macOS menu bar battery monitor by Chopsticks HQ.
 
-**Current:** `v0.2.26-Beta`
-
-## Install
+## Install (macOS)
 
 ```bash
-curl -fsSL https://chopstickshq.com/fathom/install.sh -o /tmp/fathom-install.sh && bash /tmp/fathom-install.sh
+curl -fsSL https://chopstickshq.com/fathom/install-fathom.sh | bash
 ```
 
-## Menu styles
+Or download the App ZIP from [Releases](https://github.com/ilikemacos/Fathom/releases) / [chopstickshq.com/fathom](https://chopstickshq.com/fathom/).
 
-- **Original** — Fathom’s default balanced menu (settings → Menu style)
-- **Newer** — denser compact chrome with a large charge readout
+## v0.2.31-Beta
 
-## Privacy
-
-Local only · no telemetry · optional update check via `version.json`
+Six battery sources (IOPS · SmartBattery raw · Gauge SOC · PowerTelemetry · pmset · ioreg), signed InstantAmperage fix, weighted SOC merge.
 
 ## License
 
-MIT
+MIT-style personal project — see site for terms.

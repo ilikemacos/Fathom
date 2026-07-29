@@ -1,0 +1,25 @@
+{
+  "latest": "v0.2.20-Beta",
+  "beta": "v0.2.20-Beta",
+  "experimental": "v0.2.20-Experimental",
+  "releases": {
+    "beta": {
+      "label": "v0.2.20 Beta",
+      "short": "v0.2.20",
+      "sh": "Fathom-v0.2.20-Beta.sh",
+      "source_sh": "install-fathom.sh",
+      "zip": "Fathom-v0.2.20-Beta.zip"
+    },
+    "experimental": {
+      "label": "v0.2.20 Experimental",
+      "short": "v0.2.20-Exp",
+      "sh": "Fathom-v0.2.20-Experimental.sh",
+      "source_sh": "install-fathom.sh",
+      "zip": "Fathom-v0.2.20-Experimental.zip"
+    }
+  },
+  "hashes": {
+    "beta_sh": "7b904ed739bddbf635f4b5294070fd00a0e2dc0a3223944a90ff9d190d4453b5",
+    "beta_zip": "5ece837d13e061b619e54ed3409e40f433cf72dca17258ed614bdabe991aad6b"
+  }
+}

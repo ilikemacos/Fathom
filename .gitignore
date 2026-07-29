@@ -1,0 +1,12 @@
+# Build / local
+dist/
+*.app/
+.DS_Store
+*.swp
+*~
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+.env
+.env.*

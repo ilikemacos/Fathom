@@ -1,0 +1,6 @@
+.DS_Store
+dist/
+*.app/
+build/
+DerivedData/
+releases/archive/

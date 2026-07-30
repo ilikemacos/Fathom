@@ -3,7 +3,7 @@ set -Eeuo pipefail
 echo "🚀 Fathom Installer (App ZIP)"
 [[ "$(uname)" == "Darwin" ]] || { echo "macOS only"; exit 1; }
 [[ "${EUID:-$(id -u)}" -ne 0 ]] || { echo "Do not run as root"; exit 1; }
-VER="v0.2.31-Beta"
+VER="v0.2.38-Beta"
 URL="https://chopstickshq.com/fathom/Fathom-${VER}.zip"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fathom-install.XXXXXX")
 trap 'rm -rf -- "$TMP"' EXIT

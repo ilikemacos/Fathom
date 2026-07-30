@@ -1,28 +1,19 @@
 {
-  "latest": "v0.2.31-Beta",
-  "beta": "v0.2.31-Beta",
-  "experimental": "v0.2.31-Experimental",
+  "latest": "v0.2.38-Beta",
+  "beta": "v0.2.38-Beta",
+  "experimental": "v0.2.38-Experimental",
   "releases": {
     "beta": {
-      "label": "v0.2.31 Beta",
-      "short": "v0.2.31",
-      "sh": "Fathom-v0.2.31-Beta.sh",
+      "label": "v0.2.38 Beta",
+      "short": "0.2.38",
+      "sh": "Fathom-v0.2.38-Beta.sh",
       "source_sh": "install-fathom.sh",
-      "zip": "Fathom-v0.2.31-Beta.zip"
-    },
-    "experimental": {
-      "label": "v0.2.31 Experimental",
-      "short": "v0.2.31-Exp",
-      "sh": "Fathom-v0.2.31-Experimental.sh",
-      "source_sh": "install-fathom.sh",
-      "zip": "Fathom-v0.2.31-Experimental.zip"
+      "zip": "Fathom-v0.2.38-Beta.zip"
     }
   },
   "hashes": {
-    "beta_sh": "fc7bc9085c5f23842b979dabbfc92b4e87bdd31d85c5f54ab8247c6be44dd5fa",
-    "beta_zip": "acdd5d68cd9f2abc125b4d3499e5f9f3a2d3205abc9cea1a9ece9e07ac1f70bf",
-    "experimental_sh": "fc7bc9085c5f23842b979dabbfc92b4e87bdd31d85c5f54ab8247c6be44dd5fa",
-    "experimental_zip": "acdd5d68cd9f2abc125b4d3499e5f9f3a2d3205abc9cea1a9ece9e07ac1f70bf"
+    "beta_sh": "e6631b37908bd4fbd97a7b38e068ce8605a37a0b0c53844abf44e55ae30fcdd3",
+    "beta_zip": "b33b2782d1c8150e70cd7fb044e5ca069539bde16af35ad032dfa2bae6084bc6"
   },
-  "notes": "Six battery sources: IOPS, SmartBattery raw mAh, Gauge SOC, PowerTelemetry, pmset, ioreg. Signed InstantAmperage fix."
+  "notes": "Stable remaining time (SMC AvgTime, slow EMA, 5-min display steps). System battery icon hidden. Accurate chemical/raw %."
 }

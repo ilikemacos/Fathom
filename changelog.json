@@ -1,5 +1,15 @@
 [
   {
+    "version": "v0.2.38-Beta",
+    "date": "2026-07-30",
+    "notes": [
+      "Stable battery remaining time (no thrash)",
+      "SMC AvgTime primary + spike rejection",
+      "Hide system battery icon (Fathom-only)",
+      "Chemical/raw SOC"
+    ]
+  },
+  {
     "version": "v0.2.31-Beta",
     "date": "2026-07-30",
     "notes": [
